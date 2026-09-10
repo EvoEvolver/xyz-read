@@ -20,7 +20,7 @@ To choose another directory or pin a release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/EvoEvolver/xyz-read/main/install.sh | \
-  XYZ_READ_INSTALL_DIR="$HOME/bin" XYZ_READ_VERSION=v0.1.0 sh
+  XYZ_READ_INSTALL_DIR="$HOME/bin" XYZ_READ_VERSION=v0.1.1 sh
 ```
 
 Prebuilt archives are also available on the [Releases](https://github.com/EvoEvolver/xyz-read/releases) page for:
@@ -146,7 +146,7 @@ Run `xyz-read --help` or `xyz-read <command> --help` for the complete command re
 
 ## Renderer
 
-The built-in renderer is implemented in this repository. It centers and rotates 3D coordinates, infers bonds from covalent radii, auto-fits the selected frame, rasterizes shaded atom spheres and bonds with a depth buffer, and downsamples a larger working image for smoother edges. Atom numbers use an embedded bitmap font, so output does not depend on system fonts.
+The built-in renderer is implemented in this repository. It centers and rotates 3D coordinates, infers bonds from covalent radii, auto-fits the selected frame, rasterizes shaded atom spheres and bonds with a depth buffer, and downsamples a larger working image for smoother edges. Atom numbers use an embedded regular sans-serif font, so output looks conventional and does not depend on system fonts.
 
 Rendering is deterministic for the same input and arguments. PNG output is written atomically, so an interrupted render does not leave a partial destination file.
 

@@ -1,6 +1,10 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
 use anyhow::{bail, Result};
+use fontdue::{
+    layout::{CoordinateSystem, HorizontalAlign, Layout, LayoutSettings, TextStyle, VerticalAlign},
+    Font, FontSettings,
+};
 use image::{imageops::FilterType, Rgb, RgbImage};
 
 use crate::geometry::Vec3;
@@ -338,85 +342,91 @@ fn shade(color: [u8; 3], intensity: f32) -> [u8; 3] {
 
 fn draw_number(image: &mut RgbImage, number: usize, center_x: f32, center_y: f32, radius: f32) {
     let text = number.to_string();
-    let scale = (radius / 8.5).round().clamp(1.0, 4.0) as i32;
-    let glyph_width = 5 * scale;
-    let gap = scale;
-    let total_width = text.len() as i32 * glyph_width + (text.len() as i32 - 1) * gap;
-    let start_x = center_x.round() as i32 - total_width / 2;
-    let start_y = center_y.round() as i32 - (7 * scale) / 2;
+    let font = label_font();
+    let font_size = (radius * 0.78).clamp(12.0, 42.0);
+    let region_width = (radius * 2.0).max(font_size * text.len() as f32);
+    let region_height = font_size * 1.25;
+    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+    layout.reset(&LayoutSettings {
+        x: center_x - region_width / 2.0,
+        y: center_y - region_height / 2.0,
+        max_width: Some(region_width),
+        max_height: Some(region_height),
+        horizontal_align: HorizontalAlign::Center,
+        vertical_align: VerticalAlign::Middle,
+        ..LayoutSettings::default()
+    });
+    layout.append(&[font], &TextStyle::new(&text, font_size, 0));
 
-    let mut pixels = Vec::new();
-    for (digit_index, character) in text.chars().enumerate() {
-        let glyph = digit_glyph(character);
-        let origin_x = start_x + digit_index as i32 * (glyph_width + gap);
-        for (row, bits) in glyph.iter().enumerate() {
-            for column in 0..5 {
-                if bits & (1 << (4 - column)) == 0 {
+    let glyphs: Vec<_> = layout
+        .glyphs()
+        .iter()
+        .map(|glyph| {
+            let (_, coverage) = font.rasterize_config(glyph.key);
+            (glyph.x, glyph.y, glyph.width, glyph.height, coverage)
+        })
+        .collect();
+
+    for (x, y, width, height, coverage) in &glyphs {
+        for row in 0..*height {
+            for column in 0..*width {
+                let alpha = coverage[row * width + column];
+                if alpha == 0 {
                     continue;
                 }
-                for sy in 0..scale {
-                    for sx in 0..scale {
-                        pixels.push((
-                            origin_x + column * scale + sx,
-                            start_y + row as i32 * scale + sy,
-                        ));
+                let pixel_x = x.round() as i32 + column as i32;
+                let pixel_y = y.round() as i32 + row as i32;
+                for offset_y in -1..=1 {
+                    for offset_x in -1..=1 {
+                        blend_pixel_checked(
+                            image,
+                            pixel_x + offset_x,
+                            pixel_y + offset_y,
+                            [20, 24, 30],
+                            alpha,
+                        );
                     }
                 }
             }
         }
     }
 
-    for &(x, y) in &pixels {
-        for oy in -1..=1 {
-            for ox in -1..=1 {
-                set_pixel_checked(image, x + ox, y + oy, [20, 24, 30]);
+    for (x, y, width, height, coverage) in glyphs {
+        for row in 0..height {
+            for column in 0..width {
+                let alpha = coverage[row * width + column];
+                if alpha != 0 {
+                    blend_pixel_checked(
+                        image,
+                        x.round() as i32 + column as i32,
+                        y.round() as i32 + row as i32,
+                        [255, 255, 255],
+                        alpha,
+                    );
+                }
             }
         }
     }
-    for (x, y) in pixels {
-        set_pixel_checked(image, x, y, [255, 255, 255]);
-    }
 }
 
-fn set_pixel_checked(image: &mut RgbImage, x: i32, y: i32, color: [u8; 3]) {
+fn label_font() -> &'static Font {
+    static FONT: OnceLock<Font> = OnceLock::new();
+    FONT.get_or_init(|| {
+        Font::from_bytes(
+            include_bytes!("../assets/DejaVuSans.ttf") as &[u8],
+            FontSettings::default(),
+        )
+        .expect("embedded DejaVu Sans font must be valid")
+    })
+}
+
+fn blend_pixel_checked(image: &mut RgbImage, x: i32, y: i32, color: [u8; 3], alpha: u8) {
     if x >= 0 && y >= 0 && x < image.width() as i32 && y < image.height() as i32 {
-        *image.get_pixel_mut(x as u32, y as u32) = Rgb(color);
-    }
-}
-
-fn digit_glyph(character: char) -> [u8; 7] {
-    match character {
-        '0' => [
-            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
-        ],
-        '1' => [
-            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-        '2' => [
-            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
-        ],
-        '3' => [
-            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
-        ],
-        '4' => [
-            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
-        ],
-        '5' => [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
-        ],
-        '6' => [
-            0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
-        ],
-        '7' => [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
-        ],
-        '8' => [
-            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
-        ],
-        '9' => [
-            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
-        ],
-        _ => [0; 7],
+        let pixel = image.get_pixel_mut(x as u32, y as u32);
+        let alpha = alpha as f32 / 255.0;
+        for (channel, target) in pixel.0.iter_mut().zip(color) {
+            *channel = (*channel as f32 * (1.0 - alpha) + target as f32 * alpha).round() as u8;
+        }
     }
 }
 
