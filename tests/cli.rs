@@ -18,7 +18,9 @@ fn top_level_help_exposes_agent_workflow() {
         .stdout(predicate::str::contains("zoom-out"))
         .stdout(predicate::str::contains("rotate"))
         .stdout(predicate::str::contains("--atom-numbers"))
-        .stdout(predicate::str::contains("--frame last"));
+        .stdout(predicate::str::contains("--frame last"))
+        .stdout(predicate::str::contains("PDB"))
+        .stdout(predicate::str::contains("--unit-cell"));
 }
 
 #[test]
@@ -108,4 +110,113 @@ fn reports_out_of_range_frames() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("this file has 2 frame(s)"));
+}
+
+#[test]
+fn inspects_protein_metadata_and_crystal_cell() {
+    Command::cargo_bin("xyz-read")
+        .unwrap()
+        .args(["inspect", "examples/peptide.pdb", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"format\": \"pdb\""))
+        .stdout(predicate::str::contains("\"residue_count\": 2"))
+        .stdout(predicate::str::contains("\"A\""));
+
+    Command::cargo_bin("xyz-read")
+        .unwrap()
+        .args(["inspect", "examples/nacl.cif", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"format\": \"cif\""))
+        .stdout(predicate::str::contains("\"unit_cell\""));
+}
+
+#[test]
+fn renders_explicit_connectivity_and_crystal_cell() {
+    let directory = tempfile::tempdir().unwrap();
+    let ligand = directory.path().join("ligand.png");
+    let crystal = directory.path().join("crystal.png");
+
+    Command::cargo_bin("xyz-read")
+        .unwrap()
+        .args([
+            "render",
+            "examples/ethene.sdf",
+            "-o",
+            ligand.to_str().unwrap(),
+            "--width",
+            "320",
+            "--height",
+            "240",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("xyz-read")
+        .unwrap()
+        .args([
+            "render",
+            "examples/nacl.cif",
+            "-o",
+            crystal.to_str().unwrap(),
+            "--width",
+            "320",
+            "--height",
+            "240",
+            "--unit-cell",
+        ])
+        .assert()
+        .success();
+
+    assert!(fs::metadata(ligand).unwrap().len() > 1_000);
+    assert!(fs::metadata(crystal).unwrap().len() > 1_000);
+}
+
+#[test]
+fn format_override_handles_unknown_extensions() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("structure.data");
+    fs::copy("examples/ethene.sdf", &input).unwrap();
+    Command::cargo_bin("xyz-read")
+        .unwrap()
+        .args([
+            "inspect",
+            input.to_str().unwrap(),
+            "--format",
+            "sdf",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"explicit_bond_count\": 5"));
+}
+
+#[test]
+fn detects_extensionless_poscar() {
+    Command::cargo_bin("xyz-read")
+        .unwrap()
+        .args(["inspect", "examples/POSCAR", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"format\": \"poscar\""))
+        .stdout(predicate::str::contains("\"Si\": 2"));
+}
+
+#[test]
+fn unit_cell_requires_cell_data() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("invalid.png");
+    Command::cargo_bin("xyz-read")
+        .unwrap()
+        .args([
+            "render",
+            "examples/peptide.pdb",
+            "-o",
+            output.to_str().unwrap(),
+            "--unit-cell",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has no unit-cell data"));
+    assert!(!output.exists());
 }

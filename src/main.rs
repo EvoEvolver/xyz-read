@@ -1,4 +1,7 @@
+mod cif;
+mod formats;
 mod geometry;
+mod model;
 mod render;
 mod xyz;
 
@@ -6,18 +9,18 @@ use std::{fs, io::Write, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use formats::InputFormat;
 use geometry::Vec3;
 use image::{DynamicImage, ImageFormat};
 use render::RenderSettings;
-use xyz::Trajectory;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "xyz-read",
     version,
-    about = "Inspect XYZ trajectories and render molecular images",
-    long_about = "Inspect XYZ molecular files and render deterministic PNG images for people and agents.\n\nXYZ trajectories with repeated atom-count/comment/coordinate blocks are supported. Frame numbers are 1-based. Rendering uses xyz-read's built-in CPU 3D renderer; no GUI or external chemistry software is required.",
-    after_help = "QUICK START:\n  xyz-read inspect trajectory.xyz --json\n  xyz-read render trajectory.xyz -o frame.png --frame 3 --atom-numbers\n  xyz-read zoom-in molecule.xyz -o close.png --factor 1.5\n  xyz-read rotate molecule.xyz -o turned.png --rotate-y 45 --rotate-x 15\n\nCOMPOSING OPERATIONS:\n  Every image command accepts --frame, --zoom, --rotate-x/y/z, and --atom-numbers.\n  zoom-in multiplies --zoom by --factor; zoom-out divides it by --factor.\n  Use --frame last to render the final trajectory frame.\n\nRun `xyz-read <COMMAND> --help` for command-specific options."
+    about = "Inspect and render molecular, protein, and crystal structures",
+    long_about = "Inspect molecular, protein, and crystal structure files and render deterministic PNG images for people and agents.\n\nSupported formats: XYZ, PDB, CIF/mmCIF, MOL/SDF, MOL2, and POSCAR/CONTCAR. Multi-model structures and trajectories are frames numbered from 1. Rendering uses xyz-read's built-in CPU 3D renderer; no GUI or external chemistry software is required.",
+    after_help = "QUICK START:\n  xyz-read inspect protein.pdb --json\n  xyz-read render ligand.sdf -o ligand.png --atom-numbers\n  xyz-read render crystal.cif -o cell.png --unit-cell\n  xyz-read render trajectory.xyz -o frame.png --frame 3 --rotate-y 45\n\nCONNECTIVITY:\n  Explicit bonds from PDB CONECT, CIF bond loops, MOL/SDF, and MOL2 are preserved.\n  Missing connectivity is inferred only for formats whose bond tables may be incomplete.\n\nCOMPOSING OPERATIONS:\n  Every image command accepts --format, --frame, --zoom, --rotate-x/y/z, --unit-cell, and --atom-numbers.\n  Use --frame last to render the final model or trajectory frame.\n\nRun `xyz-read <COMMAND> --help` for command-specific options."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -26,9 +29,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Report frames, atoms, elements, comments, and coordinate bounds.
+    /// Report format, frames, connectivity, protein metadata, and cell data.
     Inspect(InspectArgs),
-    /// Render a selected XYZ frame to PNG.
+    /// Render a selected structure frame to PNG.
     Render(RenderArgs),
     /// Render closer by multiplying the current zoom.
     ZoomIn(ZoomArgs),
@@ -40,8 +43,12 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct InspectArgs {
-    /// Input XYZ file. Multi-frame trajectories are supported.
+    /// Input structure file.
     input: PathBuf,
+
+    /// Input format. By default, detect it from the name and contents.
+    #[arg(long, value_enum, default_value_t = InputFormat::Auto)]
+    format: InputFormat,
 
     /// Inspect one 1-based frame number, or "last".
     #[arg(long, value_name = "NUMBER|last")]
@@ -54,8 +61,12 @@ struct InspectArgs {
 
 #[derive(Clone, Debug, Args)]
 struct RenderArgs {
-    /// Input XYZ file. Multi-frame trajectories are supported.
+    /// Input structure file.
     input: PathBuf,
+
+    /// Input format. By default, detect it from the name and contents.
+    #[arg(long, value_enum, default_value_t = InputFormat::Auto)]
+    format: InputFormat,
 
     /// Output PNG path. Existing files are replaced atomically.
     #[arg(short, long, value_name = "FILE.png")]
@@ -97,7 +108,11 @@ struct RenderArgs {
     #[arg(long)]
     atom_numbers: bool,
 
-    /// Draw atoms without automatically inferred bonds.
+    /// Draw the crystallographic unit-cell boundary when cell data exists.
+    #[arg(long)]
+    unit_cell: bool,
+
+    /// Draw atoms without explicit or automatically inferred bonds.
     #[arg(long)]
     no_bonds: bool,
 }
@@ -158,18 +173,19 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn inspect(args: InspectArgs) -> Result<()> {
-    let trajectory = Trajectory::from_path(&args.input)?;
+    let structure = formats::load(&args.input, args.format)?;
     let selected = match args.frame.as_deref() {
-        Some(selector) => Some(trajectory.frame(selector)?.0),
+        Some(selector) => Some(structure.frame(selector)?.0),
         None => None,
     };
-    let inspection = trajectory.inspect(selected);
+    let inspection = structure.inspect(selected);
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&inspection)?);
         return Ok(());
     }
 
+    println!("format: {}", inspection.format);
     println!("{} frame(s)", inspection.frame_count);
     for frame in inspection.frames {
         let elements = frame
@@ -179,8 +195,8 @@ fn inspect(args: InspectArgs) -> Result<()> {
             .collect::<Vec<_>>()
             .join(" ");
         println!(
-            "frame {}: {} atom(s) [{}]  {}",
-            frame.frame, frame.atom_count, elements, frame.comment
+            "frame {}: {} atom(s), {} bond mode [{}]  {}",
+            frame.frame, frame.atom_count, frame.connectivity, elements, frame.comment
         );
         println!(
             "  bounds: x {:.3}..{:.3}, y {:.3}..{:.3}, z {:.3}..{:.3}",
@@ -191,6 +207,24 @@ fn inspect(args: InspectArgs) -> Result<()> {
             frame.bounds.min[2],
             frame.bounds.max[2]
         );
+        if frame.residue_count > 0 || !frame.chains.is_empty() {
+            println!(
+                "  protein: {} residue(s), chain(s) {}",
+                frame.residue_count,
+                frame.chains.join(",")
+            );
+        }
+        if let Some(cell) = frame.unit_cell {
+            println!(
+                "  cell: {:.3} {:.3} {:.3} A; {:.2} {:.2} {:.2} degrees",
+                cell.lengths[0],
+                cell.lengths[1],
+                cell.lengths[2],
+                cell.angles[0],
+                cell.angles[1],
+                cell.angles[2]
+            );
+        }
     }
     Ok(())
 }
@@ -216,8 +250,8 @@ fn render_image(args: RenderArgs, zoom_modifier: f32) -> Result<()> {
         }
     }
 
-    let trajectory = Trajectory::from_path(&args.input)?;
-    let (frame_index, frame) = trajectory.frame(&args.frame)?;
+    let structure = formats::load(&args.input, args.format)?;
+    let (frame_index, frame) = structure.frame(&args.frame)?;
     let base_rotation = args.view.rotation();
     let image = render::render(
         frame,
@@ -232,13 +266,14 @@ fn render_image(args: RenderArgs, zoom_modifier: f32) -> Result<()> {
             ),
             atom_numbers: args.atom_numbers,
             bonds: !args.no_bonds,
+            unit_cell: args.unit_cell,
         },
     )?;
     write_png_atomically(&args.output, image)?;
     println!(
         "rendered frame {}/{} to {}",
         frame_index + 1,
-        trajectory.frames.len(),
+        structure.frames.len(),
         args.output.display()
     );
     Ok(())

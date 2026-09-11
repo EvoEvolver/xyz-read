@@ -1,0 +1,12 @@
+HEADER    TWO-RESIDUE PEPTIDE
+ATOM      1  N   GLY A   1      -1.458   0.000   0.000  1.00 10.00           N
+ATOM      2  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C
+ATOM      3  C   GLY A   1       0.525   1.420   0.000  1.00 10.00           C
+ATOM      4  O   GLY A   1      -0.180   2.390   0.000  1.00 10.00           O
+ATOM      5  N   ALA A   2       1.810   1.530   0.000  1.00 10.00           N
+ATOM      6  CA  ALA A   2       2.430   2.850   0.000  1.00 10.00           C
+ATOM      7  C   ALA A   2       3.940   2.720   0.000  1.00 10.00           C
+ATOM      8  O   ALA A   2       4.520   1.640   0.000  1.00 10.00           O
+ATOM      9  CB  ALA A   2       1.840   3.720   1.120  1.00 10.00           C
+TER
+END

@@ -8,7 +8,10 @@ use fontdue::{
 use image::{imageops::FilterType, Rgb, RgbImage};
 
 use crate::geometry::Vec3;
-use crate::{geometry::rotate_euler, xyz::Frame};
+use crate::{
+    geometry::rotate_euler,
+    model::{Bond, Frame},
+};
 
 const SUPERSAMPLE: u32 = 2;
 const BACKGROUND: [u8; 3] = [247, 249, 252];
@@ -21,6 +24,7 @@ pub struct RenderSettings {
     pub rotation: Vec3,
     pub atom_numbers: bool,
     pub bonds: bool,
+    pub unit_cell: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -38,12 +42,6 @@ struct ProjectedAtom {
     index: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Bond {
-    first: usize,
-    second: usize,
-}
-
 pub fn render(frame: &Frame, settings: RenderSettings) -> Result<RgbImage> {
     if frame.atoms.is_empty() {
         bail!("cannot render an empty XYZ frame");
@@ -57,7 +55,10 @@ pub fn render(frame: &Frame, settings: RenderSettings) -> Result<RgbImage> {
 
     let render_width = settings.width * SUPERSAMPLE;
     let render_height = settings.height * SUPERSAMPLE;
-    let center = coordinate_center(frame);
+    if settings.unit_cell && frame.cell.is_none() {
+        bail!("--unit-cell was requested but this frame has no unit-cell data");
+    }
+    let center = coordinate_center(frame, settings.unit_cell);
     let transformed: Vec<Vec3> = frame
         .atoms
         .iter()
@@ -70,7 +71,23 @@ pub fn render(frame: &Frame, settings: RenderSettings) -> Result<RgbImage> {
             )
         })
         .collect();
-    let scale = fit_scale(frame, &transformed, render_width, render_height) * settings.zoom;
+    let cell_points = frame.cell.filter(|_| settings.unit_cell).map(|cell| {
+        cell.corners().map(|point| {
+            rotate_euler(
+                point - center,
+                settings.rotation.x,
+                settings.rotation.y,
+                settings.rotation.z,
+            )
+        })
+    });
+    let scale = fit_scale(
+        frame,
+        &transformed,
+        cell_points.as_ref(),
+        render_width,
+        render_height,
+    ) * settings.zoom;
     let screen_center = Vec3::new(render_width as f32 / 2.0, render_height as f32 / 2.0, 0.0);
     let projected: Vec<ProjectedAtom> = frame
         .atoms
@@ -95,14 +112,20 @@ pub fn render(frame: &Frame, settings: RenderSettings) -> Result<RgbImage> {
     let mut image = RgbImage::from_pixel(render_width, render_height, Rgb(BACKGROUND));
     let mut depth = vec![f32::NEG_INFINITY; (render_width * render_height) as usize];
 
+    if let Some(points) = cell_points {
+        draw_unit_cell(&mut image, &mut depth, points, screen_center, scale);
+    }
+
     if settings.bonds {
-        for bond in infer_bonds(frame) {
+        let bonds = resolved_bonds(frame);
+        for bond in bonds {
             draw_bond(
                 &mut image,
                 &mut depth,
                 projected[bond.first],
                 projected[bond.second],
                 scale,
+                bond.order,
             );
         }
     }
@@ -132,7 +155,7 @@ pub fn render(frame: &Frame, settings: RenderSettings) -> Result<RgbImage> {
     Ok(image)
 }
 
-fn coordinate_center(frame: &Frame) -> Vec3 {
+fn coordinate_center(frame: &Frame, include_cell: bool) -> Vec3 {
     let mut min = frame.atoms[0].position;
     let mut max = min;
     for atom in &frame.atoms[1..] {
@@ -143,10 +166,26 @@ fn coordinate_center(frame: &Frame) -> Vec3 {
         max.y = max.y.max(atom.position.y);
         max.z = max.z.max(atom.position.z);
     }
+    if let Some(cell) = frame.cell.filter(|_| include_cell) {
+        for point in cell.corners() {
+            min.x = min.x.min(point.x);
+            min.y = min.y.min(point.y);
+            min.z = min.z.min(point.z);
+            max.x = max.x.max(point.x);
+            max.y = max.y.max(point.y);
+            max.z = max.z.max(point.z);
+        }
+    }
     (min + max) / 2.0
 }
 
-fn fit_scale(frame: &Frame, points: &[Vec3], width: u32, height: u32) -> f32 {
+fn fit_scale(
+    frame: &Frame,
+    points: &[Vec3],
+    cell_points: Option<&[Vec3; 8]>,
+    width: u32,
+    height: u32,
+) -> f32 {
     let mut min_x = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     let mut min_y = f32::INFINITY;
@@ -157,6 +196,14 @@ fn fit_scale(frame: &Frame, points: &[Vec3], width: u32, height: u32) -> f32 {
         max_x = max_x.max(point.x + radius);
         min_y = min_y.min(point.y - radius);
         max_y = max_y.max(point.y + radius);
+    }
+    if let Some(cell_points) = cell_points {
+        for point in cell_points {
+            min_x = min_x.min(point.x);
+            max_x = max_x.max(point.x);
+            min_y = min_y.min(point.y);
+            max_y = max_y.max(point.y);
+        }
     }
     let span_x = (max_x - min_x).max(0.5);
     let span_y = (max_y - min_y).max(0.5);
@@ -200,11 +247,29 @@ fn infer_bonds(frame: &Frame) -> Vec<Bond> {
                             + element_style(&other.element).covalent_radius)
                             * 1.25;
                         if distance >= 0.1 && distance <= threshold.min(CELL_SIZE) {
-                            bonds.push(Bond { first, second });
+                            bonds.push(Bond::new(first, second, 1));
                         }
                     }
                 }
             }
+        }
+    }
+    bonds
+}
+
+fn resolved_bonds(frame: &Frame) -> Vec<Bond> {
+    if !frame.infer_bonds {
+        return frame.bonds.clone();
+    }
+    let mut bonds = infer_bonds(frame);
+    for explicit in &frame.bonds {
+        if let Some(existing) = bonds
+            .iter_mut()
+            .find(|bond| bond.first == explicit.first && bond.second == explicit.second)
+        {
+            existing.order = explicit.order;
+        } else {
+            bonds.push(*explicit);
         }
     }
     bonds
@@ -216,14 +281,46 @@ fn draw_bond(
     first: ProjectedAtom,
     second: ProjectedAtom,
     scale: f32,
+    order: u8,
 ) {
     let midpoint = Vec3::new(
         (first.center.x + second.center.x) / 2.0,
         (first.center.y + second.center.y) / 2.0,
         (first.center.z + second.center.z) / 2.0,
     );
-    draw_bond_half(image, depth, first.center, midpoint, first.color, scale);
-    draw_bond_half(image, depth, midpoint, second.center, second.color, scale);
+    let dx = second.center.x - first.center.x;
+    let dy = second.center.y - first.center.y;
+    let screen_length = (dx * dx + dy * dy).sqrt().max(1.0);
+    let perpendicular = (-dy / screen_length, dx / screen_length);
+    let line_count = order.clamp(1, 3) as i32;
+    let radius = if line_count == 1 {
+        (scale * 0.115).clamp(2.5 * SUPERSAMPLE as f32, 9.0 * SUPERSAMPLE as f32)
+    } else {
+        (scale * 0.035).clamp(1.8 * SUPERSAMPLE as f32, 4.0 * SUPERSAMPLE as f32)
+    };
+    let spacing = radius * 2.5;
+    for line in 0..line_count {
+        let offset = (line as f32 - (line_count - 1) as f32 / 2.0) * spacing;
+        let shift = Vec3::new(perpendicular.0 * offset, perpendicular.1 * offset, 0.0);
+        draw_bond_half(
+            image,
+            depth,
+            first.center + shift,
+            midpoint + shift,
+            first.color,
+            scale,
+            radius,
+        );
+        draw_bond_half(
+            image,
+            depth,
+            midpoint + shift,
+            second.center + shift,
+            second.color,
+            scale,
+            radius,
+        );
+    }
 }
 
 fn draw_bond_half(
@@ -233,8 +330,8 @@ fn draw_bond_half(
     end: Vec3,
     color: [u8; 3],
     scale: f32,
+    radius_px: f32,
 ) {
-    let radius_px = (scale * 0.115).max(2.5 * SUPERSAMPLE as f32);
     let Some((min_x, max_x, min_y, max_y)) = clipped_bounds(
         start.x.min(end.x) - radius_px,
         start.x.max(end.x) + radius_px,
@@ -274,6 +371,47 @@ fn draw_bond_half(
                 *image.get_pixel_mut(x, y) = Rgb(shade(color, 0.48 + 0.42 * edge));
             }
         }
+    }
+}
+
+fn draw_unit_cell(
+    image: &mut RgbImage,
+    depth: &mut [f32],
+    points: [Vec3; 8],
+    screen_center: Vec3,
+    scale: f32,
+) {
+    const EDGES: [(usize, usize); 12] = [
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (1, 4),
+        (1, 5),
+        (2, 4),
+        (2, 6),
+        (3, 5),
+        (3, 6),
+        (4, 7),
+        (5, 7),
+        (6, 7),
+    ];
+    let projected = points.map(|point| {
+        Vec3::new(
+            screen_center.x + point.x * scale,
+            screen_center.y - point.y * scale,
+            point.z,
+        )
+    });
+    for (first, second) in EDGES {
+        draw_bond_half(
+            image,
+            depth,
+            projected[first],
+            projected[second],
+            [112, 124, 140],
+            scale,
+            1.5 * SUPERSAMPLE as f32,
+        );
     }
 }
 
@@ -475,10 +613,10 @@ fn element_style(element: &str) -> ElementStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xyz::Trajectory;
+    use crate::model::UnitCell;
 
     fn water() -> Frame {
-        Trajectory::parse("3\nwater\nO 0 0 0\nH .758 .586 0\nH -.758 .586 0\n")
+        crate::xyz::parse("3\nwater\nO 0 0 0\nH .758 .586 0\nH -.758 .586 0\n")
             .unwrap()
             .frames
             .remove(0)
@@ -492,6 +630,7 @@ mod tests {
             rotation: Vec3::new(-20.0, 35.0, 0.0),
             atom_numbers: false,
             bonds: true,
+            unit_cell: false,
         }
     }
 
@@ -533,5 +672,30 @@ mod tests {
     #[test]
     fn finds_water_bonds() {
         assert_eq!(infer_bonds(&water()).len(), 2);
+    }
+
+    #[test]
+    fn keeps_partial_explicit_bonds_and_infers_missing_ones() {
+        let mut frame = water();
+        frame.bonds = vec![Bond::new(0, 1, 2)];
+        let bonds = resolved_bonds(&frame);
+        assert_eq!(bonds.len(), 2);
+        assert_eq!(bonds.iter().find(|bond| bond.second == 1).unwrap().order, 2);
+    }
+
+    #[test]
+    fn renders_a_unit_cell() {
+        let mut frame = water();
+        frame.cell = Some(UnitCell::from_parameters([4.0; 3], [90.0; 3]).unwrap());
+        let image = render(
+            &frame,
+            RenderSettings {
+                unit_cell: true,
+                ..settings()
+            },
+        )
+        .unwrap();
+        let without_cell = render(&frame, settings()).unwrap();
+        assert_ne!(image.as_raw(), without_cell.as_raw());
     }
 }
