@@ -10,7 +10,7 @@ use image::{imageops::FilterType, Rgb, RgbImage};
 use crate::geometry::Vec3;
 use crate::{
     geometry::rotate_euler,
-    model::{Bond, Frame},
+    model::{Bond, Frame, NumberingMode},
 };
 
 const SUPERSAMPLE: u32 = 2;
@@ -22,7 +22,7 @@ pub struct RenderSettings {
     pub height: u32,
     pub zoom: f32,
     pub rotation: Vec3,
-    pub atom_numbers: bool,
+    pub atom_numbers: Option<NumberingMode>,
     pub bonds: bool,
     pub unit_cell: bool,
 }
@@ -40,6 +40,7 @@ struct ProjectedAtom {
     radius_px: f32,
     color: [u8; 3],
     index: usize,
+    highlighted: bool,
 }
 
 pub fn render(frame: &Frame, settings: RenderSettings) -> Result<RgbImage> {
@@ -105,6 +106,7 @@ pub fn render(frame: &Frame, settings: RenderSettings) -> Result<RgbImage> {
                 radius_px: (style.radius * scale).max(4.0 * SUPERSAMPLE as f32),
                 color: style.color,
                 index,
+                highlighted: atom.highlighted,
             }
         })
         .collect();
@@ -130,6 +132,9 @@ pub fn render(frame: &Frame, settings: RenderSettings) -> Result<RgbImage> {
         }
     }
     for atom in &projected {
+        if atom.highlighted {
+            draw_highlight(&mut image, &mut depth, *atom, scale);
+        }
         draw_sphere(&mut image, &mut depth, *atom, scale);
     }
 
@@ -139,13 +144,22 @@ pub fn render(frame: &Frame, settings: RenderSettings) -> Result<RgbImage> {
         settings.height,
         FilterType::Lanczos3,
     );
-    if settings.atom_numbers {
+    if let Some(numbering) = settings.atom_numbers {
         let mut label_positions = projected;
         label_positions.sort_by(|left, right| left.center.z.total_cmp(&right.center.z));
         for atom in label_positions {
-            draw_number(
+            let source = &frame.atoms[atom.index];
+            let number = match numbering {
+                NumberingMode::OneBased => source.input_index as i64 + 1,
+                NumberingMode::Rdkit => source.input_index as i64,
+                NumberingMode::Source => source
+                    .serial
+                    .map(i64::from)
+                    .unwrap_or(source.input_index as i64 + 1),
+            };
+            draw_label(
                 &mut image,
-                atom.index + 1,
+                &number.to_string(),
                 atom.center.x / SUPERSAMPLE as f32,
                 atom.center.y / SUPERSAMPLE as f32,
                 atom.radius_px / SUPERSAMPLE as f32,
@@ -257,7 +271,7 @@ fn infer_bonds(frame: &Frame) -> Vec<Bond> {
     bonds
 }
 
-fn resolved_bonds(frame: &Frame) -> Vec<Bond> {
+pub(crate) fn resolved_bonds(frame: &Frame) -> Vec<Bond> {
     if !frame.infer_bonds {
         return frame.bonds.clone();
     }
@@ -454,6 +468,33 @@ fn draw_sphere(image: &mut RgbImage, depth: &mut [f32], atom: ProjectedAtom, sca
     }
 }
 
+fn draw_highlight(image: &mut RgbImage, depth: &mut [f32], atom: ProjectedAtom, scale: f32) {
+    let radius = atom.radius_px + 3.0 * SUPERSAMPLE as f32;
+    let min_x = (atom.center.x - radius).floor().max(0.0) as u32;
+    let max_x = (atom.center.x + radius)
+        .ceil()
+        .min(image.width().saturating_sub(1) as f32) as u32;
+    let min_y = (atom.center.y - radius).floor().max(0.0) as u32;
+    let max_y = (atom.center.y + radius)
+        .ceil()
+        .min(image.height().saturating_sub(1) as f32) as u32;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = x as f32 + 0.5 - atom.center.x;
+            let dy = y as f32 + 0.5 - atom.center.y;
+            if dx * dx + dy * dy > radius * radius {
+                continue;
+            }
+            let offset = (y * image.width() + x) as usize;
+            let highlight_depth = atom.center.z - 0.01 / scale.max(0.001);
+            if highlight_depth >= depth[offset] {
+                depth[offset] = highlight_depth;
+                *image.get_pixel_mut(x, y) = Rgb([22, 150, 145]);
+            }
+        }
+    }
+}
+
 fn clipped_bounds(
     min_x: f32,
     max_x: f32,
@@ -478,8 +519,7 @@ fn shade(color: [u8; 3], intensity: f32) -> [u8; 3] {
     color.map(|channel| ((channel as f32 * intensity).min(255.0)) as u8)
 }
 
-fn draw_number(image: &mut RgbImage, number: usize, center_x: f32, center_y: f32, radius: f32) {
-    let text = number.to_string();
+fn draw_label(image: &mut RgbImage, text: &str, center_x: f32, center_y: f32, radius: f32) {
     let font = label_font();
     let font_size = (radius * 0.78).clamp(12.0, 42.0);
     let region_width = (radius * 2.0).max(font_size * text.len() as f32);
@@ -494,7 +534,7 @@ fn draw_number(image: &mut RgbImage, number: usize, center_x: f32, center_y: f32
         vertical_align: VerticalAlign::Middle,
         ..LayoutSettings::default()
     });
-    layout.append(&[font], &TextStyle::new(&text, font_size, 0));
+    layout.append(&[font], &TextStyle::new(text, font_size, 0));
 
     let glyphs: Vec<_> = layout
         .glyphs()
@@ -545,6 +585,18 @@ fn draw_number(image: &mut RgbImage, number: usize, center_x: f32, center_y: f32
             }
         }
     }
+}
+
+pub(crate) fn draw_panel_label(image: &mut RgbImage, label: &str) {
+    for y in 8..52.min(image.height()) {
+        for x in 8..52.min(image.width()) {
+            let pixel = image.get_pixel_mut(x, y);
+            for channel in &mut pixel.0 {
+                *channel = ((*channel as u16 + 255) / 2) as u8;
+            }
+        }
+    }
+    draw_label(image, label, 30.0, 30.0, 22.0);
 }
 
 fn label_font() -> &'static Font {
@@ -628,7 +680,7 @@ mod tests {
             height: 240,
             zoom: 1.0,
             rotation: Vec3::new(-20.0, 35.0, 0.0),
-            atom_numbers: false,
+            atom_numbers: None,
             bonds: true,
             unit_cell: false,
         }
@@ -647,12 +699,21 @@ mod tests {
         let numbered = render(
             &water(),
             RenderSettings {
-                atom_numbers: true,
+                atom_numbers: Some(NumberingMode::OneBased),
                 ..settings()
             },
         )
         .unwrap();
         assert_ne!(plain.as_raw(), numbered.as_raw());
+    }
+
+    #[test]
+    fn highlight_outline_changes_rendered_pixels() {
+        let plain = render(&water(), settings()).unwrap();
+        let mut highlighted = water();
+        highlighted.atoms[0].highlighted = true;
+        let highlighted = render(&highlighted, settings()).unwrap();
+        assert_ne!(plain.as_raw(), highlighted.as_raw());
     }
 
     #[test]

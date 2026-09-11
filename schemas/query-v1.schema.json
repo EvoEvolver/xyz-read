@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "xyz-read query result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tool_version", "input_sha256", "format", "frame", "selection", "atom_count", "explicit_bond_count", "resolved_bond_count", "elements", "roles", "residue_count", "residues"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "tool_version": {"type": "string"},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "format": {"type": "string"},
+    "frame": {"type": "integer", "minimum": 1},
+    "selection": {"type": "string"},
+    "atom_count": {"type": "integer", "minimum": 0},
+    "explicit_bond_count": {"type": "integer", "minimum": 0},
+    "resolved_bond_count": {"type": "integer", "minimum": 0},
+    "elements": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 1}
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 1}
+    },
+    "residue_count": {"type": "integer", "minimum": 0},
+    "residues": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/residue"}
+    },
+    "atoms": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/atom"}
+    },
+    "explicit_bonds": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/bond"}
+    },
+    "resolved_bonds": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/bond"}
+    }
+  },
+  "$defs": {
+    "residue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["residue", "role", "atom_count"],
+      "properties": {
+        "chain": {"type": "string"},
+        "residue": {"type": "string"},
+        "residue_name": {"type": "string"},
+        "residue_number": {"type": "integer"},
+        "role": {"enum": ["unknown", "polymer", "ligand", "water", "ion"]},
+        "atom_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "atom": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "rdkit_index", "element", "role", "position"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 1},
+        "rdkit_index": {"type": "integer", "minimum": 0},
+        "source_serial": {"type": "integer"},
+        "element": {"type": "string"},
+        "atom_name": {"type": "string"},
+        "residue": {"type": "string"},
+        "residue_name": {"type": "string"},
+        "residue_number": {"type": "integer"},
+        "chain": {"type": "string"},
+        "role": {"enum": ["unknown", "polymer", "ligand", "water", "ion"]},
+        "position": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"type": "number"}
+        }
+      }
+    },
+    "bond": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first", "second", "first_rdkit_index", "second_rdkit_index", "order", "explicit"],
+      "properties": {
+        "first": {"type": "integer", "minimum": 1},
+        "second": {"type": "integer", "minimum": 1},
+        "first_rdkit_index": {"type": "integer", "minimum": 0},
+        "second_rdkit_index": {"type": "integer", "minimum": 0},
+        "order": {"type": "integer", "minimum": 1},
+        "explicit": {"type": "boolean"}
+      }
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "xyz-read view specification v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tool_version", "input", "frame", "camera", "image"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "tool_version": {"type": "string"},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "format", "sha256"],
+      "properties": {
+        "path": {"type": "string"},
+        "format": {"enum": ["xyz", "pdb", "cif", "mmcif", "mol", "sdf", "mol2", "poscar"]},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "frame": {"type": "string", "pattern": "^(last|[1-9][0-9]*)$"},
+    "selection": {"type": "string", "minLength": 1},
+    "highlight": {"type": "string", "minLength": 1},
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["view", "rotation", "zoom"],
+      "properties": {
+        "view": {"enum": ["iso", "x", "y", "z"]},
+        "rotation": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"type": "number"}
+        },
+        "zoom": {"type": "number", "minimum": 0.05, "maximum": 20}
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "atom_numbers", "numbering", "unit_cell", "bonds"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 128, "maximum": 4096},
+        "height": {"type": "integer", "minimum": 128, "maximum": 4096},
+        "atom_numbers": {"type": "boolean"},
+        "numbering": {"enum": ["one-based", "rdkit", "source"]},
+        "unit_cell": {"type": "boolean"},
+        "bonds": {"type": "boolean"}
+      }
+    }
+  }
+}

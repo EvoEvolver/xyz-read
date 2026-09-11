@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "xyz-read candidate manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tool_version", "input", "frame", "selection", "contact_sheet", "candidates"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "tool_version": {"type": "string"},
+    "input": {"$ref": "view-v1.schema.json#/properties/input"},
+    "frame": {"type": "integer", "minimum": 1},
+    "selection": {"type": "string"},
+    "highlight": {"type": "string"},
+    "contact_sheet": {"type": "string"},
+    "candidates": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "file", "spec", "view", "rotation"],
+        "properties": {
+          "label": {"enum": ["A", "B", "C", "D", "E", "F"]},
+          "file": {"type": "string"},
+          "spec": {"type": "string"},
+          "view": {"enum": ["iso", "x", "y", "z"]},
+          "rotation": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {"type": "number"}
+          }
+        }
+      }
+    }
+  }
+}

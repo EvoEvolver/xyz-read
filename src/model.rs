@@ -1,31 +1,62 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::geometry::Vec3;
 
 #[derive(Clone, Debug)]
 pub struct Atom {
+    /// Zero-based position in the input frame. This stays stable after selection.
+    pub input_index: usize,
     pub element: String,
     pub position: Vec3,
     pub label: Option<String>,
     pub residue: Option<String>,
+    pub residue_name: Option<String>,
+    pub residue_number: Option<i32>,
     pub chain: Option<String>,
     pub serial: Option<i32>,
+    pub role: AtomRole,
+    pub highlighted: bool,
 }
 
 impl Atom {
     pub fn new(element: impl Into<String>, position: Vec3) -> Self {
         Self {
+            input_index: 0,
             element: element.into(),
             position,
             label: None,
             residue: None,
+            residue_name: None,
+            residue_number: None,
             chain: None,
             serial: None,
+            role: AtomRole::Unknown,
+            highlighted: false,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AtomRole {
+    #[default]
+    Unknown,
+    Polymer,
+    Ligand,
+    Water,
+    Ion,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NumberingMode {
+    #[default]
+    OneBased,
+    Rdkit,
+    Source,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +166,9 @@ pub struct Structure {
 
 #[derive(Debug, Serialize)]
 pub struct Inspection {
+    pub schema_version: u32,
+    pub tool_version: &'static str,
+    pub input_sha256: String,
     pub format: String,
     pub frame_count: usize,
     pub frames: Vec<FrameInspection>,
@@ -162,6 +196,14 @@ pub struct Bounds {
 }
 
 impl Structure {
+    pub fn assign_input_indices(&mut self) {
+        for frame in &mut self.frames {
+            for (index, atom) in frame.atoms.iter_mut().enumerate() {
+                atom.input_index = index;
+            }
+        }
+    }
+
     pub fn frame(&self, selector: &str) -> Result<(usize, &Frame)> {
         let index = if selector.eq_ignore_ascii_case("last") {
             self.frames.len().saturating_sub(1)
@@ -193,6 +235,9 @@ impl Structure {
             .map(|(index, frame)| frame.inspect(index + 1))
             .collect();
         Inspection {
+            schema_version: 1,
+            tool_version: env!("CARGO_PKG_VERSION"),
+            input_sha256: String::new(),
             format: self.format.clone(),
             frame_count: self.frames.len(),
             frames,

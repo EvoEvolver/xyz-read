@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
@@ -6,7 +6,9 @@ use clap::ValueEnum;
 use crate::{
     cif,
     geometry::Vec3,
-    model::{deduplicate_bonds, normalize_element, Atom, Bond, Frame, Structure, UnitCell},
+    model::{
+        deduplicate_bonds, normalize_element, Atom, AtomRole, Bond, Frame, Structure, UnitCell,
+    },
     xyz,
 };
 
@@ -24,23 +26,35 @@ pub enum InputFormat {
     Poscar,
 }
 
-pub fn load(path: &Path, requested: InputFormat) -> Result<Structure> {
-    let source = fs::read_to_string(path)
-        .with_context(|| format!("could not read structure file {}", path.display()))?;
+pub fn load_text(
+    source: &str,
+    name_hint: Option<&Path>,
+    requested: InputFormat,
+) -> Result<Structure> {
+    let fallback = Path::new("stdin");
+    let path = name_hint.unwrap_or(fallback);
     let format = match requested {
-        InputFormat::Auto => detect(path, &source)?,
+        InputFormat::Auto => detect(path, source)?,
         format => format,
     };
     let result = match format {
         InputFormat::Auto => unreachable!(),
-        InputFormat::Xyz => xyz::parse(&source),
-        InputFormat::Pdb => parse_pdb(&source),
-        InputFormat::Cif | InputFormat::Mmcif => cif::parse(&source),
-        InputFormat::Mol | InputFormat::Sdf => parse_sdf(&source),
-        InputFormat::Mol2 => parse_mol2(&source),
-        InputFormat::Poscar => parse_poscar(&source),
+        InputFormat::Xyz => xyz::parse(source),
+        InputFormat::Pdb => parse_pdb(source),
+        InputFormat::Cif | InputFormat::Mmcif => cif::parse(source),
+        InputFormat::Mol | InputFormat::Sdf => parse_sdf(source),
+        InputFormat::Mol2 => parse_mol2(source),
+        InputFormat::Poscar => parse_poscar(source),
     };
-    result.with_context(|| format!("invalid {} file {}", format_name(format), path.display()))
+    let mut structure = result.with_context(|| {
+        format!(
+            "invalid {} structure from {}",
+            format_name(format),
+            path.display()
+        )
+    })?;
+    structure.assign_input_indices();
+    Ok(structure)
 }
 
 fn detect(path: &Path, source: &str) -> Result<InputFormat> {
@@ -209,10 +223,16 @@ fn parse_pdb(source: &str) -> Result<Structure> {
                 atom.label = Some(atom_name.to_owned());
                 atom.serial = serial;
                 let residue_name = field(line, 17, 20).trim();
-                let residue_number = field(line, 22, 27).trim();
-                if !residue_name.is_empty() || !residue_number.is_empty() {
-                    atom.residue = Some(format!("{residue_name}{residue_number}"));
+                let residue_number_text = field(line, 22, 26).trim();
+                let insertion_code = field(line, 26, 27).trim();
+                if !residue_name.is_empty() || !residue_number_text.is_empty() {
+                    atom.residue = Some(format!(
+                        "{residue_name}{residue_number_text}{insertion_code}"
+                    ));
                 }
+                atom.residue_name = (!residue_name.is_empty()).then(|| residue_name.to_owned());
+                atom.residue_number = residue_number_text.parse().ok();
+                atom.role = pdb_atom_role(record, residue_name);
                 let chain = field(line, 21, 22).trim();
                 if !chain.is_empty() {
                     atom.chain = Some(chain.to_owned());
@@ -258,6 +278,45 @@ fn parse_pdb(source: &str) -> Result<Structure> {
     })
 }
 
+fn pdb_atom_role(record: &str, residue_name: &str) -> AtomRole {
+    if record == "ATOM" {
+        return AtomRole::Polymer;
+    }
+    hetero_atom_role(residue_name)
+}
+
+pub(crate) fn hetero_atom_role(residue_name: &str) -> AtomRole {
+    let residue = residue_name.to_ascii_uppercase();
+    if matches!(residue.as_str(), "HOH" | "WAT" | "DOD" | "H2O") {
+        AtomRole::Water
+    } else if matches!(
+        residue.as_str(),
+        "LI" | "NA"
+            | "K"
+            | "RB"
+            | "CS"
+            | "MG"
+            | "CA"
+            | "SR"
+            | "BA"
+            | "ZN"
+            | "FE"
+            | "CU"
+            | "MN"
+            | "CO"
+            | "NI"
+            | "CD"
+            | "HG"
+            | "CL"
+            | "BR"
+            | "IOD"
+    ) {
+        AtomRole::Ion
+    } else {
+        AtomRole::Ligand
+    }
+}
+
 fn field(line: &str, start: usize, end: usize) -> &str {
     line.get(start.min(line.len())..end.min(line.len()))
         .unwrap_or("")
@@ -288,8 +347,18 @@ fn pdb_element(atom_name: &str, polymer_atom: bool) -> Result<String> {
 
 fn parse_sdf(source: &str) -> Result<Structure> {
     let mut frames = Vec::new();
-    for record in source.split("$$$$") {
-        let record = record.trim_matches(['\r', '\n']);
+    for (record_index, record) in source.split("$$$$").enumerate() {
+        let record = record.trim_end_matches(['\r', '\n']);
+        // The newline after an SDF delimiter separates records. A leading newline in
+        // the first record, however, is a valid empty MOL title as emitted by RDKit.
+        let record = if record_index > 0 {
+            record
+                .strip_prefix("\r\n")
+                .or_else(|| record.strip_prefix('\n'))
+                .unwrap_or(record)
+        } else {
+            record
+        };
         if record.trim().is_empty() {
             continue;
         }
@@ -341,7 +410,9 @@ fn parse_mol_record(record: &str) -> Result<Frame> {
             bail!("MOL atom line {} is incomplete", offset + 5);
         }
         let position = Vec3::new(fields[0].parse()?, fields[1].parse()?, fields[2].parse()?);
-        atoms.push(Atom::new(normalize_element(fields[3])?, position));
+        let mut atom = Atom::new(normalize_element(fields[3])?, position);
+        atom.role = AtomRole::Ligand;
+        atoms.push(atom);
     }
     let mut bonds = Vec::with_capacity(bond_count);
     for (offset, line) in lines[4 + atom_count..4 + atom_count + bond_count]
@@ -396,10 +467,12 @@ fn parse_v3000(lines: &[&str]) -> Result<Frame> {
                 if fields.len() >= 6 {
                     let id: i32 = fields[0].parse()?;
                     atom_ids.insert(id, atoms.len());
-                    atoms.push(Atom::new(
+                    let mut atom = Atom::new(
                         normalize_element(fields[1])?,
                         Vec3::new(fields[2].parse()?, fields[3].parse()?, fields[4].parse()?),
-                    ));
+                    );
+                    atom.role = AtomRole::Ligand;
+                    atoms.push(atom);
                 }
             }
             _ if section == "BOND" => {
@@ -462,8 +535,12 @@ fn parse_mol2(source: &str) -> Result<Structure> {
                         Vec3::new(fields[2].parse()?, fields[3].parse()?, fields[4].parse()?),
                     );
                     atom.label = Some(fields[1].to_owned());
+                    atom.role = AtomRole::Ligand;
                     if fields.len() >= 8 {
                         atom.residue = Some(fields[7].to_owned());
+                        let (name, number) = split_residue_label(fields[7]);
+                        atom.residue_name = name;
+                        atom.residue_number = number;
                     }
                     atom_ids.insert(id, atoms.len());
                     atoms.push(atom);
@@ -507,6 +584,19 @@ fn parse_mol2(source: &str) -> Result<Structure> {
         format: "mol2".to_owned(),
         frames,
     })
+}
+
+fn split_residue_label(value: &str) -> (Option<String>, Option<i32>) {
+    let boundary = value
+        .char_indices()
+        .find(|(_, character)| character.is_ascii_digit() || *character == '-')
+        .map(|(index, _)| index)
+        .unwrap_or(value.len());
+    let (name, number) = value.split_at(boundary);
+    (
+        (!name.is_empty()).then(|| name.to_owned()),
+        number.parse::<i32>().ok(),
+    )
 }
 
 fn parse_poscar(source: &str) -> Result<Structure> {
@@ -661,9 +751,37 @@ mod tests {
     }
 
     #[test]
+    fn pdb_classifies_polymer_water_ion_and_ligand_atoms() {
+        let source = "ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00 20.00           N\nHETATM    2  O   HOH A 101       2.000   0.000   0.000  1.00 20.00           O\nHETATM    3 NA    NA A 102       4.000   0.000   0.000  1.00 20.00          NA\nHETATM    4  C1  LIG A 103       6.000   0.000   0.000  1.00 20.00           C\n";
+        let structure = parse_pdb(source).unwrap();
+        let roles = structure.frames[0]
+            .atoms
+            .iter()
+            .map(|atom| atom.role)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            roles,
+            vec![
+                AtomRole::Polymer,
+                AtomRole::Water,
+                AtomRole::Ion,
+                AtomRole::Ligand
+            ]
+        );
+    }
+
+    #[test]
     fn mol_reads_explicit_bond_orders() {
         let source = "ethene\n  xyz-read\n\n  2  1  0  0  0  0            999 V2000\n    0.0 0.0 0.0 C\n    1.34 0.0 0.0 C\n  1  2  2\nM  END\n";
         let structure = parse_sdf(source).unwrap();
+        assert_eq!(structure.frames[0].bonds[0].order, 2);
+    }
+
+    #[test]
+    fn mol_accepts_the_empty_title_emitted_by_rdkit() {
+        let source = "\n     RDKit          3D\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n    1.3400    0.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  2  0\nM  END\n";
+        let structure = parse_sdf(source).unwrap();
+        assert_eq!(structure.frames[0].atoms.len(), 2);
         assert_eq!(structure.frames[0].bonds[0].order, 2);
     }
 

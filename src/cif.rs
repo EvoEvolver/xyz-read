@@ -4,7 +4,9 @@ use anyhow::{bail, Context, Result};
 
 use crate::{
     geometry::Vec3,
-    model::{deduplicate_bonds, normalize_element, Atom, Bond, Frame, Structure, UnitCell},
+    model::{
+        deduplicate_bonds, normalize_element, Atom, AtomRole, Bond, Frame, Structure, UnitCell,
+    },
 };
 
 #[derive(Debug)]
@@ -169,6 +171,16 @@ pub fn parse(source: &str) -> Result<Structure> {
                 residue_number.unwrap_or("")
             ));
         }
+        atom.residue_name = residue_name.map(str::to_owned);
+        atom.residue_number = residue_number.and_then(|value| value.parse().ok());
+        let group = value(atom_loop, row, &["_atom_site_group_pdb"])
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        atom.role = match group.as_str() {
+            "ATOM" => AtomRole::Polymer,
+            "HETATM" => crate::formats::hetero_atom_role(residue_name.unwrap_or("")),
+            _ => AtomRole::Unknown,
+        };
         atom.serial =
             value(atom_loop, row, &["_atom_site_id"]).and_then(|value| value.parse().ok());
         grouped[group_index].1.push(atom);

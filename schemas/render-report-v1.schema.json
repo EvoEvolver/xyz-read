@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "xyz-read render report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tool_version", "input_sha256", "frame", "frame_count", "selection", "selected_atoms", "drawn_bonds", "camera", "image", "warnings"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "tool_version": {"type": "string"},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "frame": {"type": "integer", "minimum": 1},
+    "frame_count": {"type": "integer", "minimum": 1},
+    "selection": {"type": "string"},
+    "highlight": {"type": "string"},
+    "selected_atoms": {"type": "integer", "minimum": 1},
+    "drawn_bonds": {"type": "integer", "minimum": 0},
+    "camera": {"$ref": "view-v1.schema.json#/properties/camera"},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "width", "height"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "width": {"type": "integer", "minimum": 128, "maximum": 4096},
+        "height": {"type": "integer", "minimum": 128, "maximum": 4096}
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}
